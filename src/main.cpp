@@ -9,12 +9,20 @@
 #include <TlHelp32.h>
 #include<Psapi.h>
 #include<string>
+#include<sstream>
+#include<vector>
 
 typedef int8_t u8; //1byte
 typedef int16_t u16;
 typedef int32_t u32;
 typedef int64_t u64; //8byte
 
+struct Citra {
+	HANDLE hprocess;
+	u8* page_table;
+};
+
+//--discarded--//
 BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam) {
 	char windowTitle[256];
 	GetWindowTextA(hWnd, windowTitle, 256);
@@ -26,7 +34,75 @@ BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam) {
 	}
 	return TRUE;
 }
+HANDLE GetProcessHandle() {
+	//this method is discarded
 
+	//std::cin.unsetf(std::ios::hex);
+
+	char citra_window_name[256] = { 0, };
+	char inital_value[256] = { 0, };
+
+	TCHAR citra_window_name_t[256] = { 0, };
+
+	std::cout << "finding citra window name..." << std::endl;
+
+	while (1) {
+		EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(citra_window_name));
+		std::cout << citra_window_name << std::endl;
+
+		if (strcmp(citra_window_name, inital_value)) {
+			MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, citra_window_name, strlen(citra_window_name), citra_window_name_t, 256);
+			//std::wcout << citra_window_name_t << std::endl;
+			break;
+		}
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+	}
+
+	HWND citra_window = FindWindow(NULL, citra_window_name_t);
+
+	if (!citra_window) {
+		std::cout << "cannot find window" << std::endl;
+		return 0;
+	}
+
+	std::cout << "find citra window handle " << citra_window << std::endl;
+
+	DWORD process_id = 0;
+	GetWindowThreadProcessId(citra_window, &process_id);
+
+	std::cout << "got process id " << process_id << std::endl;
+
+	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, true, process_id);
+
+	return hProcess;
+}
+//-------------//
+
+
+HANDLE GetProcessHandleByEXE() {
+	PROCESSENTRY32 entry;
+	entry.dwSize = sizeof(PROCESSENTRY32);
+
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+	if (Process32First(snapshot, &entry) == TRUE)
+	{
+		while (Process32Next(snapshot, &entry) == TRUE)
+		{
+			//std::wcout << entry.szExeFile << std::endl;
+
+			if (wcscmp(entry.szExeFile, L"citra-qt.exe") == 0)
+			{
+				HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, entry.th32ProcessID);
+
+				return hProcess;
+			}
+		}
+	}
+
+	return NULL;
+}
 u8* GetBasePointer(HANDLE citra_process) {
 	/*
 	TCHAR main_exe_name[512];
@@ -120,65 +196,82 @@ u8* GetVaddr(HANDLE citra_process, u8* page_table, u64 paddr) {
 	return NULL;
 }
 
-int main(int argc, char** argv) {
-	//std::cin.unsetf(std::ios::hex);
+u64 ReadCitraData(Citra citra, u64 vaddr, int d_size) {
+	u8 data[8] = { 0, };
+	DWORD64 bytes_read = 0;
 
-	char citra_window_name[256] = { 0, };
-	char inital_value[256] = { 0, };
-
-	TCHAR citra_window_name_t[256] = { 0, };
-	
-	std::cout << "finding citra window name..." << std::endl;
-
-	while (1) {
-		EnumWindows(EnumWindowsProc, reinterpret_cast<LPARAM>(citra_window_name));
-		std::cout << citra_window_name << std::endl;
-
-		if (strcmp(citra_window_name, inital_value)) {
-			MultiByteToWideChar(CP_ACP, MB_PRECOMPOSED, citra_window_name, strlen(citra_window_name), citra_window_name_t, 256);
-			//std::cout << citra_window_name_t << std::endl;
-			break;
-		}
-
-		std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+	for (int i = 0; i < d_size; i++) {
+		u8* paddr = GetPaddr(citra.hprocess, citra.page_table, vaddr - i); //assume Big Endian
+		ReadProcessMemory(citra.hprocess, (void*)paddr, &data[i], 1, &bytes_read);
 	}
 
-	HWND citra_window = FindWindow(NULL, citra_window_name_t);
+	return *(u64*)data;
+}
 
-	if (!citra_window) {
-		std::cout << "cannot find window" << std::endl;
+void WriteCitraData(Citra citra, u64 vaddr, u8* data, int d_size) {
+	DWORD64 bytes_read = 0;
+
+	for (int i = 0; i < d_size; i++) {
+		u8* paddr = GetPaddr(citra.hprocess, citra.page_table, vaddr - i); //assume Big Endian
+		WriteProcessMemory(citra.hprocess, (void*)paddr, &data[i], 1, &bytes_read);
+	}
+}
+
+int MainCommand(Citra citra) {
+	std::string command;
+	std::cout << "> ";
+	std::getline(std::cin, command);
+
+	std::stringstream ss(command);
+	std::string token;
+	std::vector<std::string> tokens;
+
+	while (ss >> token)
+		tokens.push_back(token);
+
+	if (tokens[0] == "quit") {
+		//quit
+		std::cout << "exit from program" << std::endl;
 		return 0;
 	}
+	if (tokens[0] == "getp") {
+		//getp [vaddr]
+		u8* paddr = GetPaddr(citra.hprocess, citra.page_table, (u64)std::stoull(tokens[1], nullptr, 16));
+		std::cout << "got physical adress " << std::hex << (void*)(paddr) << std::endl;
+	}
+	if (tokens[0] == "getv") {
+		//getv [paddr]
+		u8* vaddr = GetVaddr(citra.hprocess, citra.page_table, (u64)std::stoull(tokens[1], nullptr, 16));
+		std::cout << "got virtual adress " << std::hex << (void*)vaddr << std::endl;
+	}
+	if (tokens[0] == "readv") {
+		//readv [datasize] [vaddr]
+		u64 data = ReadCitraData(citra, (u64)std::stoull(tokens[2], nullptr, 16), std::stoi(tokens[1]));
+		std::cout << "read data " << std::dec << (unsigned long long)data << std::endl;
+	}
+	if (tokens[0] == "writev") {
+		//writev [datasize] [data] [vaddr]
+		u64 data = (u64)std::stoull(tokens[2]);
+		WriteCitraData(citra, (u64)std::stoull(tokens[3], nullptr, 16), (u8*)&data, std::stoi(tokens[1]));
+		std::cout << "write data " << std::dec << (unsigned long long)data << std::endl;
+	}
+}
 
-	std::cout << "find citra window handle " << citra_window << std::endl;	
+int main(int argc, char** argv) {
+	Citra citra; //hprocess & page_table
 
-	DWORD process_id = 0;
-	GetWindowThreadProcessId(citra_window, &process_id);
+	citra.hprocess = GetProcessHandleByEXE();
 
-	std::cout << "got process id " << process_id << std::endl;
+	std::cout << "got process handle " << citra.hprocess << std::endl;
 
-	HANDLE citra_process = OpenProcess(PROCESS_ALL_ACCESS, true, process_id);
+	get_page_pointer(citra.hprocess, &citra.page_table);
 
-	std::cout << "got process handle " << citra_process << std::endl;
+	std::cout << "page table start point " << std::hex << (void*)(citra.page_table) << std::endl;
 
-	u8* page_table = 0;
+	while (MainCommand(citra));
 
-	get_page_pointer(citra_process, &page_table);
+	//86CA6A8
+	//86CA798
 
-	std::cout << "page table start point " << std::hex << (void*)(page_table) << std::endl;
-
-	
-	u64 vaddr_i = 0;
-	std::cout << "input virtual adress: "; std::cin >> std::hex >> vaddr_i;
-	
-	u8* paddr_o = GetPaddr(citra_process, page_table, vaddr_i);
-	std::cout << "got physical adress " << std::hex << (void*)(paddr_o) << std::endl;
-	
-
-	u64 paddr_i = 0;
-	std::cout << "input physical adress: "; std::cin >> std::hex >> paddr_i;
-
-	u8* vaddr_o = GetVaddr(citra_process, page_table, (u64)paddr_i);
-	std::cout << "got virtual adress " << (void*)vaddr_o << std::endl;
 	return 0;
 }
